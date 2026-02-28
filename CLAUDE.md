@@ -104,6 +104,14 @@ On startup, the app connects to all configured MCP servers, lists their tools (c
 
 The runner parses the procedure into prepare phase and workout stages, executes each step via Gemini with AFC, and uses a **sliding context window** (last 3 step exchanges + system prompt) to bound latency. Older exchanges are collapsed to user+model pairs.
 
+## Workout Plan Generator
+
+The `generate_workout` command launches a multi-turn conversation where Gemini asks the user about their workout preferences (fitness level, target muscles, time, reps, injuries) one question at a time. Once confirmed, the model generates a workout plan following the rules in `RULES.md`.
+
+`RULES.md` defines the required plan structure, valid keywords, exercise breakdowns (push-ups, squats, burpees, stretches, etc.), and a validation checklist. After generation, a separate review model call checks the plan for compliance. If issues are found, the generator retries (up to 2 times). The full Q&A history is kept during the conversation; context is compacted after the plan is extracted before entering the review loop.
+
+The final plan is saved to `WORKOUT_PROCEDURE.md`.
+
 ## Logging
 
 Uses Python `logging` library with the `chat` logger. INFO level by default, DEBUG with `-d` flag. Debug output includes context sizes, AFC history, API call traces, and audio stats. Interactive prompts and responses use `print()`.

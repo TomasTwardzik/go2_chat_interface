@@ -112,9 +112,9 @@ uv run ty check .
 
 ## Future Development Ideas
 
-### 1. Dynamic workout plan generation
+### ~~1. Dynamic workout plan generation~~ (Implemented)
 
-Add a model sub-call that generates a bespoke workout plan tailored to user goals, fitness level, and available equipment. Introduce a `RULES.md` file that defines the required plan structure (valid keywords, stage format, timing constraints, etc.) so the model is constrained to produce plans compatible with the workout runner. After generation, a second model call reviews the plan against `RULES.md` for compliance — checking correct syntax, safe exercise ordering, and valid Action/Say/Voice/Wait usage — and either approves or requests corrections before the plan is saved.
+Implemented as the `generate_workout` command. Uses multi-turn Gemini conversation to gather user preferences, generates a plan following `RULES.md`, and reviews it for compliance before saving to `WORKOUT_PROCEDURE.md`.
 
 ### 2. Unified voice and text input
 
