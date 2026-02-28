@@ -4,6 +4,10 @@
       "command": "/home/tomas_twardzik/dev/experiments/go2/go2_py311/bin/python",
       "args": ["-m", "go2_mcp"],
       "cwd": "/home/tomas_twardzik/dev/experiments/go2"
+    },
+    "voice": {
+      "command": "/home/tomas_twardzik/dev/experiments/test_chat_interface/.venv/bin/python",
+      "args": ["/home/tomas_twardzik/dev/experiments/test_chat_interface/MCPs/voice_server.py"]
     }
   }
 }

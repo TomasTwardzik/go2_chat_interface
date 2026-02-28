@@ -3,6 +3,10 @@
       "go2": {
         "command": "/home/tomas_twardzik/dev/experiments/go2/go2_py311/bin/python",
         "args": ["/home/tomas_twardzik/dev/experiments/go2/go2_mcp/dummy_server.py"]
+      },
+      "voice": {
+        "command": "/home/tomas_twardzik/dev/experiments/test_chat_interface/.venv/bin/python",
+        "args": ["/home/tomas_twardzik/dev/experiments/test_chat_interface/MCPs/voice_server.py"]
       }
     }
   }
