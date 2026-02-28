@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import io
 import json
+import logging
 import os
 import re
 import sys
@@ -23,9 +24,11 @@ from mcp import ClientSession, StdioServerParameters, stdio_client
 
 load_dotenv()
 
+log = logging.getLogger("chat")
+
 MODEL = "gemini-3-flash-preview"
 MAX_TOOL_CALLS = 10
-STEP_PAUSE = 1.0
+HISTORY_KEEP_STEPS = 3
 SAMPLE_RATE = 16000
 CHANNELS = 1
 MCP_DIR = Path(__file__).parent / "MCPs"
@@ -35,11 +38,14 @@ WORKOUT_PATH = Path(__file__).parent / "Workout_procedure.md"
 
 
 def get_client() -> genai.Client:
+    log.debug("Loading Google API key from environment")
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
+        log.error("GOOGLE_API_KEY environment variable is not set")
         print("Error: GOOGLE_API_KEY environment variable is not set.")
         print("Export it with: export GOOGLE_API_KEY='your-key-here'")
         sys.exit(1)
+    log.debug("Creating genai.Client")
     return genai.Client(api_key=api_key)
 
 
@@ -50,10 +56,14 @@ def get_client() -> genai.Client:
 
 def load_mcp_config(config_path: Path) -> dict[str, Any]:
     """Load MCP server configuration from the given JSON file."""
+    log.debug("Loading MCP config from %s", config_path)
     if not config_path.exists():
+        log.warning("MCP config file not found: %s", config_path)
         return {}
     with open(config_path) as f:
-        return json.load(f)
+        data = json.load(f)
+    log.debug("MCP config loaded: %d server(s)", len(data.get("mcpServers", {})))
+    return data
 
 
 async def connect_mcp_servers(
@@ -63,14 +73,15 @@ async def connect_mcp_servers(
     """Connect to all MCP servers defined in config. Returns {name: session}."""
     servers: dict[str, ClientSession] = {}
     mcp_servers = config.get("mcpServers", {})
+    log.debug("Connecting to %d MCP server(s)", len(mcp_servers))
 
     for name, server_cfg in mcp_servers.items():
         command = server_cfg["command"]
         args = server_cfg.get("args", [])
         cwd = server_cfg.get("cwd")
-        print(f"  [{name}] Launching: {command} {' '.join(args)}")
+        log.info("[%s] Launching: %s %s", name, command, " ".join(args))
         if cwd:
-            print(f"  [{name}] Working dir: {cwd}")
+            log.info("[%s] Working dir: %s", name, cwd)
 
         params = StdioServerParameters(
             command=command,
@@ -79,23 +90,28 @@ async def connect_mcp_servers(
             cwd=cwd,
         )
         try:
+            log.debug("[%s] Opening stdio transport", name)
             read_stream, write_stream = await exit_stack.enter_async_context(stdio_client(params))
+            log.debug("[%s] Creating ClientSession", name)
             session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+            log.debug("[%s] Initializing session", name)
             result = await session.initialize()
             server_info = result.serverInfo if result else None
             if server_info:
                 version = f" v{server_info.version}" if server_info.version else ""
-                print(f"  [{name}] Connected: {server_info.name}{version}")
+                log.info("[%s] Connected: %s%s", name, server_info.name, version)
             else:
-                print(f"  [{name}] Connected (no server info)")
+                log.info("[%s] Connected (no server info)", name)
 
             capabilities = session.get_server_capabilities()
+            log.debug("[%s] Capabilities: %s", name, capabilities)
             if capabilities and capabilities.tools:
-                print(f"  [{name}] Capabilities: tools supported")
+                log.info("[%s] Capabilities: tools supported", name)
             servers[name] = session
         except Exception as e:
-            print(f"  [{name}] FAILED to connect: {e}")
+            log.error("[%s] FAILED to connect: %s", name, e)
 
+    log.debug("Connected to %d/%d server(s)", len(servers), len(mcp_servers))
     return servers
 
 
@@ -107,22 +123,25 @@ async def list_mcp_tools(sessions: dict[str, ClientSession]) -> int:
     """
     total = 0
     for server_name, session in sessions.items():
+        log.debug("[%s] Listing tools", server_name)
         result = await session.list_tools()
         count = len(result.tools)
         total += count
-        print(f"  [{server_name}] Discovered {count} tool(s):")
+        log.info("[%s] Discovered %d tool(s)", server_name, count)
         for tool in result.tools:
             desc = f" - {tool.description}" if tool.description else ""
-            print(f"    - {tool.name}{desc}")
+            log.info("  - %s%s", tool.name, desc)
 
         # Patch session so the SDK reuses the cached tool list
         # instead of issuing a new ListToolsRequest per generate_content() call.
         cached = result
+        log.debug("[%s] Caching list_tools result (%d tools)", server_name, count)
 
         async def _cached_list_tools(_cached: Any = cached) -> Any:
             return _cached
 
         session.list_tools = _cached_list_tools  # type: ignore[assignment]
+    log.debug("Total tools discovered: %d", total)
     return total
 
 
@@ -139,6 +158,7 @@ def record_audio() -> bytes:
     def callback(indata: np.ndarray, _frames: int, _time: object, _status: object) -> None:
         frames.append(indata.copy())
 
+    log.debug("Starting audio recording (rate=%d, channels=%d)", SAMPLE_RATE, CHANNELS)
     print("\n🎙  Recording... press [Enter] to stop and send.")
     stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -157,13 +177,17 @@ def record_audio() -> bytes:
     stream.close()
 
     audio_data = np.concatenate(frames, axis=0)
+    log.debug("Recorded %d frames, %.1f seconds", len(audio_data), len(audio_data) / SAMPLE_RATE)
     buf = io.BytesIO()
     sf.write(buf, audio_data, SAMPLE_RATE, format="WAV", subtype="PCM_16")
-    return buf.getvalue()
+    wav_bytes = buf.getvalue()
+    log.debug("Encoded WAV: %d bytes", len(wav_bytes))
+    return wav_bytes
 
 
 def transcribe_audio(client: genai.Client, audio_bytes: bytes) -> str:
     """Send audio to Gemini for transcription. Returns the transcript text."""
+    log.debug("Transcribing %d bytes of audio via %s", len(audio_bytes), MODEL)
     audio_part = genai.types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
     text_part = genai.types.Part(
         text="Transcribe this audio exactly as spoken. Return only the transcription, nothing else."
@@ -172,19 +196,25 @@ def transcribe_audio(client: genai.Client, audio_bytes: bytes) -> str:
         model=MODEL,
         contents=[genai.types.Content(role="user", parts=[audio_part, text_part])],
     )
-    return (response.text or "").strip()
+    transcript = (response.text or "").strip()
+    log.debug("Transcription result: %r", transcript)
+    return transcript
 
 
 def speak_text(text: str) -> None:
     """Convert text to speech and play it through speakers."""
+    log.debug("TTS: generating speech for %d chars", len(text))
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
         tts = gTTS(text=text)
         tts.write_to_fp(tmp)
         tmp.flush()
         tmp.seek(0)
+        log.debug("TTS: reading audio from %s", tmp.name)
         data, samplerate = sf.read(tmp.name)
+        log.debug("TTS: playing audio (samplerate=%d, samples=%d)", samplerate, len(data))
         sd.play(data, samplerate)
         sd.wait()
+    log.debug("TTS: playback complete")
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +224,7 @@ def speak_text(text: str) -> None:
 
 def parse_procedure(text: str) -> dict[str, Any]:
     """Parse Workout_procedure.md into header, prepare steps, and workout steps."""
+    log.debug("Parsing workout procedure (%d chars)", len(text))
     header_lines: list[str] = []
     sections: dict[str, list[str]] = {}
     current_section: str | None = None
@@ -203,6 +234,7 @@ def parse_procedure(text: str) -> dict[str, Any]:
         if stripped.startswith("## "):
             current_section = stripped[3:].strip()
             sections[current_section] = []
+            log.debug("Found section: %s", current_section)
             continue
         if current_section is None:
             # Skip the # title line
@@ -212,56 +244,128 @@ def parse_procedure(text: str) -> dict[str, Any]:
             step_text = stripped.split(".", 1)[1].strip() if "." in stripped else stripped
             sections[current_section].append(step_text)
 
-    return {
+    result = {
         "header": "\n".join(header_lines),
         "prepare": sections.get("Prepare phase", []),
         "stages": sections.get("Workout Stages", []),
     }
+    log.debug(
+        "Parsed: %d header lines, %d prepare steps, %d workout stages",
+        len(header_lines),
+        len(result["prepare"]),
+        len(result["stages"]),
+    )
+    return result
 
 
 async def execute_steps(
     label: str,
     steps: list[str],
     client: genai.Client,
-    history: list[genai.types.Content],
+    system_prompt: list[genai.types.Content],
     config: genai.types.GenerateContentConfig | None,
 ) -> None:
-    """Execute a list of workout steps, logging actions and speaking output."""
+    """Execute a list of workout steps with a sliding context window.
+
+    Keeps the system prompt pair plus only the last HISTORY_KEEP_STEPS step
+    exchanges to bound latency and token usage as the workout progresses.
+    """
     wait_pattern = re.compile(r"\[WAIT:([\d.]+)]")
+    log.debug("[%s] Executing %d step(s) (window=%d)", label, len(steps), HISTORY_KEEP_STEPS)
+
+    # Each "step exchange" is a list of Content entries (user + AFC + model)
+    # produced by one step. We keep at most HISTORY_KEEP_STEPS of these.
+    step_exchanges: list[list[genai.types.Content]] = []
 
     for i, step in enumerate(steps, 1):
-        print(f"[{label}] Step {i}/{len(steps)}: {step}")
+        log.info("[%s] Step %d/%d: %s", label, i, len(steps), step)
 
-        history.append(
-            genai.types.Content(
-                role="user",
-                parts=[genai.types.Part(text=f"Execute step {i}: {step}")],
-            )
+        user_msg = genai.types.Content(
+            role="user",
+            parts=[genai.types.Part(text=f"Execute step {i}: {step}")],
+        )
+
+        # Build context: system prompt + recent step exchanges + current user msg
+        recent: list[genai.types.Content] = []
+        for exchange in step_exchanges:
+            recent.extend(exchange)
+        context = system_prompt + recent + [user_msg]
+        log.debug(
+            "[%s] Context: %d system + %d recent + 1 new = %d entries",
+            label,
+            len(system_prompt),
+            len(recent),
+            len(context),
         )
 
         try:
             response = await client.aio.models.generate_content(
                 model=MODEL,
-                contents=history,
+                contents=context,
                 config=config,
             )
             result_text = response.text or ""
+            log.debug("[%s] Response text: %r", label, result_text[:200])
+
+            # Collect all entries produced by this step
+            exchange: list[genai.types.Content] = [user_msg]
 
             afc_history = response.automatic_function_calling_history
             if afc_history:
+                log.debug("[%s] AFC history: %d entries", label, len(afc_history))
                 for entry in afc_history:
                     if entry.parts:
                         for part in entry.parts:
                             if part.function_call:
                                 fc = part.function_call
-                                print(f"  [action] {fc.name}({dict(fc.args or {})})")
+                                log.info(
+                                    "[%s]   action: %s(%s)",
+                                    label,
+                                    fc.name,
+                                    dict(fc.args or {}),
+                                )
                             if part.function_response:
                                 fr = part.function_response
-                                print(f"  [result] {fr.name} -> {fr.response}")
-                history.extend(afc_history)
+                                log.info("[%s]   result: %s -> %s", label, fr.name, fr.response)
+                exchange.extend(afc_history)
+            else:
+                log.debug("[%s] No AFC history for this step", label)
 
-            history.append(
+            exchange.append(
                 genai.types.Content(role="model", parts=[genai.types.Part(text=result_text)])
+            )
+
+            # Append and trim to sliding window.
+            # For older exchanges, collapse to just user + model summary
+            # to prevent AFC history from bloating context.
+            step_exchanges.append(exchange)
+            if len(step_exchanges) > HISTORY_KEEP_STEPS:
+                trimmed = len(step_exchanges) - HISTORY_KEEP_STEPS
+                step_exchanges = step_exchanges[-HISTORY_KEEP_STEPS:]
+                log.debug(
+                    "[%s] Trimmed %d old exchange(s), keeping %d",
+                    label,
+                    trimmed,
+                    HISTORY_KEEP_STEPS,
+                )
+            # Collapse all but the most recent exchange: keep only user + model
+            for idx in range(len(step_exchanges) - 1):
+                ex = step_exchanges[idx]
+                if len(ex) > 2:
+                    old_len = len(ex)
+                    step_exchanges[idx] = [ex[0], ex[-1]]
+                    log.debug(
+                        "[%s] Collapsed exchange %d: %d -> 2 entries",
+                        label,
+                        idx,
+                        old_len,
+                    )
+            total_entries = sum(len(e) for e in step_exchanges)
+            log.debug(
+                "[%s] Step exchanges: %d, total entries in window: %d",
+                label,
+                len(step_exchanges),
+                total_entries,
             )
 
             for line in result_text.splitlines():
@@ -271,17 +375,15 @@ async def execute_steps(
                 wait_match = wait_pattern.search(line)
                 if wait_match:
                     delay = float(wait_match.group(1))
-                    print(f"  [wait]   {delay}s")
+                    log.info("[%s]   wait: %.1fs", label, delay)
                     await asyncio.sleep(delay)
                 else:
-                    print(f"  [text]   {line}")
+                    log.info("[%s]   text: %s", label, line)
 
         except Exception as e:
-            print(f"  [error]  {e}")
+            log.error("[%s] Step %d failed: %s", label, i, e, exc_info=True)
 
-        if i < len(steps):
-            print(f"  [pause]  {STEP_PAUSE}s")
-            await asyncio.sleep(STEP_PAUSE)
+    log.debug("[%s] All %d step(s) complete", label, len(steps))
 
 
 async def run_workout(
@@ -289,23 +391,23 @@ async def run_workout(
     sessions: list[ClientSession],
 ) -> None:
     """Load Workout_procedure.md, run prepare phase, then workout stages."""
+    log.info("Starting workout procedure")
     if not WORKOUT_PATH.exists():
-        print("[workout] Workout_procedure.md not found.")
+        log.error("Workout_procedure.md not found at %s", WORKOUT_PATH)
         return
 
+    log.debug("Reading %s", WORKOUT_PATH)
     procedure = parse_procedure(WORKOUT_PATH.read_text())
     header = procedure["header"]
     prepare_steps: list[str] = procedure["prepare"]
     workout_steps: list[str] = procedure["stages"]
 
-    print("\n" + "=" * 60)
-    print("[workout] Starting workout procedure")
-    print("=" * 60)
-    print(f"[workout] Instructions:\n{header}")
-    print(f"[workout] {len(prepare_steps)} prepare step(s), {len(workout_steps)} workout step(s)")
+    log.info("Instructions:\n%s", header)
+    log.info("%d prepare step(s), %d workout step(s)", len(prepare_steps), len(workout_steps))
 
     # Build config with MCP sessions
     tools: list[Any] = list(sessions)
+    log.debug("Building GenerateContentConfig with %d MCP session(s)", len(tools))
     config = (
         genai.types.GenerateContentConfig(
             tools=tools,
@@ -331,8 +433,9 @@ async def run_workout(
         '- For "Action(<action>)" steps, use the appropriate Go2 MCP tool.\n'
         "- Execute ONLY the current step. Be concise.\n"
     )
+    log.debug("System prompt: %s", system_prompt)
 
-    history: list[genai.types.Content] = [
+    system_prefix: list[genai.types.Content] = [
         genai.types.Content(role="user", parts=[genai.types.Part(text=system_prompt)]),
         genai.types.Content(
             role="model",
@@ -342,21 +445,16 @@ async def run_workout(
 
     # --- Prepare phase ---
     if prepare_steps:
-        print("\n" + "-" * 40)
-        print("[prepare] Running prepare phase")
-        print("-" * 40)
-        await execute_steps("prepare", prepare_steps, client, history, config)
-        print("[prepare] Prepare phase complete")
+        log.info("--- Prepare phase (%d steps) ---", len(prepare_steps))
+        await execute_steps("prepare", prepare_steps, client, system_prefix, config)
+        log.info("Prepare phase complete")
 
     # --- Workout stages ---
     if workout_steps:
-        print("\n" + "-" * 40)
-        print("[workout] Running workout stages")
-        print("-" * 40)
-        await execute_steps("workout", workout_steps, client, history, config)
+        log.info("--- Workout stages (%d steps) ---", len(workout_steps))
+        await execute_steps("workout", workout_steps, client, system_prefix, config)
 
-    print("\n[workout] Workout complete!")
-    print("=" * 60)
+    log.info("Workout complete!")
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +472,7 @@ async def chat_loop(
     # Build config: pass MCP sessions directly — the SDK handles
     # tool discovery, schema conversion, routing, and the agentic loop.
     tools: list[Any] = list(sessions)
+    log.debug("Building chat config with %d MCP session(s)", len(tools))
     config = (
         genai.types.GenerateContentConfig(
             tools=tools,
@@ -394,28 +493,35 @@ async def chat_loop(
             user_input = await asyncio.to_thread(input, "\nYou: ")
             user_input = user_input.strip()
         except (KeyboardInterrupt, EOFError):
+            log.debug("Received interrupt/EOF, exiting chat loop")
             print("\nGoodbye!")
             break
 
         if not user_input:
+            log.debug("Empty input, skipping")
             continue
         if user_input.lower() in ("quit", "exit"):
+            log.debug("Quit command received")
             print("Goodbye!")
             break
         if user_input.lower() == "clear":
             history.clear()
+            log.debug("Conversation history cleared")
             print("Conversation cleared.")
             continue
         if user_input.lower() == "start_workout":
+            log.debug("start_workout command received")
             await run_workout(client, sessions)
             continue
 
         voice_mode = user_input.lower() == "voice"
         if voice_mode:
+            log.debug("Voice mode activated")
             try:
                 audio_bytes = await asyncio.to_thread(record_audio)
                 transcript = transcribe_audio(client, audio_bytes)
                 if not transcript:
+                    log.warning("Transcription returned empty result")
                     print("\n(Could not transcribe audio)")
                     continue
                 print(f"\nYou (voice): {transcript}")
@@ -423,30 +529,38 @@ async def chat_loop(
 
                 # Check if voice command triggers workout
                 if "start workout" in transcript.lower():
+                    log.debug("Voice command triggered start_workout")
                     await run_workout(client, sessions)
                     continue
             except Exception as e:
+                log.error("Voice input failed: %s", e, exc_info=True)
                 print(f"\nError: {e}")
                 continue
 
+        log.debug("Sending user message: %r", user_input[:100])
         history.append(genai.types.Content(role="user", parts=[genai.types.Part(text=user_input)]))
         try:
+            log.debug("Calling generate_content (history=%d)", len(history))
             response = await client.aio.models.generate_content(
                 model=MODEL,
                 contents=history,
                 config=config,
             )
             assistant_text = response.text or "(empty response)"
+            log.debug("Response: %r", assistant_text[:200])
 
             # Preserve AFC tool-call history in conversation context
             afc_history = response.automatic_function_calling_history
             if afc_history:
+                log.debug("AFC history: %d entries", len(afc_history))
                 history.extend(afc_history)
 
             history.append(
                 genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
             )
+            log.debug("History size: %d entries", len(history))
         except Exception as e:
+            log.error("generate_content failed: %s", e, exc_info=True)
             print(f"\nError: {e}")
             history.pop()
             continue
@@ -454,6 +568,7 @@ async def chat_loop(
         print(f"\nAssistant: {assistant_text}")
 
         if voice_mode:
+            log.debug("Speaking response in voice mode")
             await asyncio.to_thread(speak_text, assistant_text)
 
 
@@ -465,31 +580,42 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use the simulator MCP server instead of the real one",
     )
+    parser.add_argument(
+        "-d",
+        "--debug",
+        action="store_true",
+        help="Enable debug logging",
+    )
     return parser.parse_args()
 
 
 async def main() -> None:
     args = parse_args()
+
+    level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     config_path = MCP_SIM_CONFIG if args.sim else MCP_REAL_CONFIG
     mode = "SIMULATION" if args.sim else "REAL"
 
-    print("=" * 60)
-    print(f"Chat Interface - Starting up [{mode}]")
-    print("=" * 60)
-
-    print(f"\n[model] {MODEL}")
-    print(f"[mode]  {mode}")
+    log.info("Chat Interface starting up [%s]", mode)
+    log.info("Model: %s", MODEL)
+    log.debug("Config path: %s", config_path)
 
     client = get_client()
-    print("[api]   Google API key loaded")
+    log.info("Google API key loaded")
 
     mcp_config = load_mcp_config(config_path)
     mcp_servers = mcp_config.get("mcpServers", {})
 
     if not mcp_servers:
-        print(f"\n[mcp]   No MCP servers configured in {config_path.name}")
+        log.warning("No MCP servers configured in %s", config_path.name)
     else:
-        print(f"\n[mcp]   Loading {len(mcp_servers)} server(s) from {config_path.name}")
+        log.info("Loading %d server(s) from %s", len(mcp_servers), config_path.name)
 
     async with AsyncExitStack() as stack:
         sessions = await connect_mcp_servers(mcp_config, stack)
@@ -497,13 +623,12 @@ async def main() -> None:
         connected = len(sessions)
         failed = len(mcp_servers) - connected
         if mcp_servers:
-            print(f"\n[mcp]   {connected} connected, {failed} failed")
+            log.info("MCP: %d connected, %d failed", connected, failed)
 
         tool_count = await list_mcp_tools(sessions)
 
-        print(f"\n[ready] {tool_count} MCP tool(s) available to {MODEL}")
-        print(f"[afc]   Automatic function calling enabled (max {MAX_TOOL_CALLS} calls/turn)")
-        print("=" * 60)
+        log.info("%d MCP tool(s) available to %s", tool_count, MODEL)
+        log.info("Automatic function calling enabled (max %d calls/turn)", MAX_TOOL_CALLS)
 
         await chat_loop(client, list(sessions.values()), tool_count)
 
