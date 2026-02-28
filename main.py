@@ -339,9 +339,15 @@ async def execute_steps(
             )
 
             # Append and trim to sliding window.
-            # For older exchanges, collapse to just user + model summary
-            # to prevent AFC history from bloating context.
-            step_exchanges.append(exchange)
+            # Immediately collapse every exchange to [user, model] to prevent
+            # AFC history from bloating context — only the user prompt and
+            # final model response are needed for subsequent steps.
+            step_exchanges.append([exchange[0], exchange[-1]])
+            log.debug(
+                "[%s] Collapsed exchange: %d -> 2 entries",
+                label,
+                len(exchange),
+            )
             if len(step_exchanges) > HISTORY_KEEP_STEPS:
                 trimmed = len(step_exchanges) - HISTORY_KEEP_STEPS
                 step_exchanges = step_exchanges[-HISTORY_KEEP_STEPS:]
@@ -351,18 +357,6 @@ async def execute_steps(
                     trimmed,
                     HISTORY_KEEP_STEPS,
                 )
-            # Collapse all but the most recent exchange: keep only user + model
-            for idx in range(len(step_exchanges) - 1):
-                ex = step_exchanges[idx]
-                if len(ex) > 2:
-                    old_len = len(ex)
-                    step_exchanges[idx] = [ex[0], ex[-1]]
-                    log.debug(
-                        "[%s] Collapsed exchange %d: %d -> 2 entries",
-                        label,
-                        idx,
-                        old_len,
-                    )
             total_entries = sum(len(e) for e in step_exchanges)
             log.debug(
                 "[%s] Step exchanges: %d, total entries in window: %d",
