@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import io
 import json
@@ -22,9 +23,12 @@ from mcp import ClientSession, StdioServerParameters, stdio_client
 load_dotenv()
 
 MODEL = "gemini-3-flash-preview"
+MAX_TOOL_CALLS = 10
 SAMPLE_RATE = 16000
 CHANNELS = 1
-MCP_CONFIG_PATH = Path(__file__).parent / "Go2_MCP.json"
+MCP_DIR = Path(__file__).parent / "MCPs"
+MCP_REAL_CONFIG = MCP_DIR / "Go2_MCP.json"
+MCP_SIM_CONFIG = MCP_DIR / "Go2_MCP_simulator.json"
 
 
 def get_client() -> genai.Client:
@@ -41,11 +45,11 @@ def get_client() -> genai.Client:
 # ---------------------------------------------------------------------------
 
 
-def load_mcp_config() -> dict[str, Any]:
-    """Load MCP server configuration from Go2_MCP.json."""
-    if not MCP_CONFIG_PATH.exists():
+def load_mcp_config(config_path: Path) -> dict[str, Any]:
+    """Load MCP server configuration from the given JSON file."""
+    if not config_path.exists():
         return {}
-    with open(MCP_CONFIG_PATH) as f:
+    with open(config_path) as f:
         return json.load(f)
 
 
@@ -58,78 +62,52 @@ async def connect_mcp_servers(
     mcp_servers = config.get("mcpServers", {})
 
     for name, server_cfg in mcp_servers.items():
+        command = server_cfg["command"]
+        args = server_cfg.get("args", [])
+        cwd = server_cfg.get("cwd")
+        print(f"  [{name}] Launching: {command} {' '.join(args)}")
+        if cwd:
+            print(f"  [{name}] Working dir: {cwd}")
+
         params = StdioServerParameters(
-            command=server_cfg["command"],
-            args=server_cfg.get("args", []),
+            command=command,
+            args=args,
             env={**os.environ, **server_cfg.get("env", {})},
+            cwd=cwd,
         )
-        read_stream, write_stream = await exit_stack.enter_async_context(stdio_client(params))
-        session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-        await session.initialize()
-        servers[name] = session
-        print(f"  Connected to MCP server: {name}")
+        try:
+            read_stream, write_stream = await exit_stack.enter_async_context(stdio_client(params))
+            session = await exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+            result = await session.initialize()
+            server_info = result.serverInfo if result else None
+            if server_info:
+                version = f" v{server_info.version}" if server_info.version else ""
+                print(f"  [{name}] Connected: {server_info.name}{version}")
+            else:
+                print(f"  [{name}] Connected (no server info)")
+
+            capabilities = session.get_server_capabilities()
+            if capabilities and capabilities.tools:
+                print(f"  [{name}] Capabilities: tools supported")
+            servers[name] = session
+        except Exception as e:
+            print(f"  [{name}] FAILED to connect: {e}")
 
     return servers
 
 
-async def gather_mcp_tools(
-    sessions: dict[str, ClientSession],
-) -> tuple[list[genai.types.Tool], dict[str, ClientSession]]:
-    """List tools from all MCP sessions. Returns Gemini tools and a name->session map."""
-    declarations: list[genai.types.FunctionDeclaration] = []
-    tool_session_map: dict[str, ClientSession] = {}
-
-    for _server_name, session in sessions.items():
+async def list_mcp_tools(sessions: dict[str, ClientSession]) -> int:
+    """Print discovered tools from all sessions. Returns total tool count."""
+    total = 0
+    for server_name, session in sessions.items():
         result = await session.list_tools()
+        count = len(result.tools)
+        total += count
+        print(f"  [{server_name}] Discovered {count} tool(s):")
         for tool in result.tools:
-            schema = tool.inputSchema
-            declarations.append(
-                genai.types.FunctionDeclaration(
-                    name=tool.name,
-                    description=tool.description or "",
-                    parameters_json_schema=schema,
-                )
-            )
-            tool_session_map[tool.name] = session
-            print(f"    Tool: {tool.name}")
-
-    if not declarations:
-        return [], tool_session_map
-
-    return [genai.types.Tool(function_declarations=declarations)], tool_session_map
-
-
-async def execute_tool_call(
-    tool_session_map: dict[str, ClientSession],
-    function_call: genai.types.FunctionCall,
-) -> genai.types.Part:
-    """Execute a single MCP tool call and return a FunctionResponse Part."""
-    name = function_call.name or ""
-    args = dict(function_call.args or {})
-    session = tool_session_map.get(name)
-
-    if session is None:
-        return genai.types.Part(
-            function_response=genai.types.FunctionResponse(
-                name=name, response={"error": f"Unknown tool: {name}"}
-            )
-        )
-
-    print(f"  -> Calling tool: {name}({args})")
-    result = await session.call_tool(name, arguments=args)
-
-    texts: list[str] = []
-    for block in result.content or []:
-        if hasattr(block, "text") and block.text:
-            texts.append(str(block.text))
-    output = "\n".join(texts)
-    if result.isError:
-        return genai.types.Part(
-            function_response=genai.types.FunctionResponse(name=name, response={"error": output})
-        )
-    return genai.types.Part(
-        function_response=genai.types.FunctionResponse(name=name, response={"output": output})
-    )
+            desc = f" - {tool.description}" if tool.description else ""
+            print(f"    - {tool.name}{desc}")
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -194,63 +172,30 @@ def speak_text(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Agentic chat loop
+# Chat loop (uses SDK automatic function calling for MCP tools)
 # ---------------------------------------------------------------------------
-
-
-async def generate_response(
-    client: genai.Client,
-    history: list[genai.types.Content],
-    tools: list[genai.types.Tool],
-    tool_session_map: dict[str, ClientSession],
-) -> str:
-    """Send history to Gemini, handle tool calls in a loop, return final text."""
-    config = genai.types.GenerateContentConfig(tools=list(tools)) if tools else None
-
-    while True:
-        response = client.models.generate_content(
-            model=MODEL,
-            contents=history,
-            config=config,
-        )
-
-        # Check if the model wants to call functions
-        candidates = response.candidates
-        if not candidates or candidates[0].content is None:
-            return response.text or "(empty response)"
-
-        model_content = candidates[0].content
-        parts = model_content.parts or []
-        function_calls = [p.function_call for p in parts if p.function_call]
-
-        if not function_calls:
-            # No tool calls — return the text response
-            assistant_text = response.text or "(empty response)"
-            history.append(
-                genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
-            )
-            return assistant_text
-
-        # Add the model's function-call turn to history
-        history.append(model_content)
-
-        # Execute all tool calls and collect responses
-        response_parts: list[genai.types.Part] = []
-        for fc in function_calls:
-            part = await execute_tool_call(tool_session_map, fc)
-            response_parts.append(part)
-
-        # Add tool results to history and loop back
-        history.append(genai.types.Content(role="user", parts=response_parts))
 
 
 async def chat_loop(
     client: genai.Client,
-    tools: list[genai.types.Tool],
-    tool_session_map: dict[str, ClientSession],
+    sessions: list[ClientSession],
+    tool_count: int,
 ) -> None:
     history: list[genai.types.Content] = []
-    tool_count = sum(len(t.function_declarations or []) for t in tools)
+
+    # Build config: pass MCP sessions directly — the SDK handles
+    # tool discovery, schema conversion, routing, and the agentic loop.
+    tools: list[Any] = list(sessions)
+    config = (
+        genai.types.GenerateContentConfig(
+            tools=tools,
+            automatic_function_calling=genai.types.AutomaticFunctionCallingConfig(
+                maximum_remote_calls=MAX_TOOL_CALLS,
+            ),
+        )
+        if tools
+        else None
+    )
 
     print(f"\nChat with {MODEL} ({tool_count} MCP tools available)")
     print("Commands: 'quit'/'exit', 'clear', 'voice' (push-to-talk)")
@@ -290,7 +235,21 @@ async def chat_loop(
 
         history.append(genai.types.Content(role="user", parts=[genai.types.Part(text=user_input)]))
         try:
-            assistant_text = await generate_response(client, history, tools, tool_session_map)
+            response = await client.aio.models.generate_content(
+                model=MODEL,
+                contents=history,
+                config=config,
+            )
+            assistant_text = response.text or "(empty response)"
+
+            # Preserve AFC tool-call history in conversation context
+            afc_history = response.automatic_function_calling_history
+            if afc_history:
+                history.extend(afc_history)
+
+            history.append(
+                genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
+            )
         except Exception as e:
             print(f"\nError: {e}")
             history.pop()
@@ -302,19 +261,55 @@ async def chat_loop(
             await asyncio.to_thread(speak_text, assistant_text)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Chat Interface - Gemini + MCP")
+    parser.add_argument(
+        "-s",
+        "--sim",
+        action="store_true",
+        help="Use the simulator MCP server instead of the real one",
+    )
+    return parser.parse_args()
+
+
 async def main() -> None:
+    args = parse_args()
+    config_path = MCP_SIM_CONFIG if args.sim else MCP_REAL_CONFIG
+    mode = "SIMULATION" if args.sim else "REAL"
+
+    print("=" * 60)
+    print(f"Chat Interface - Starting up [{mode}]")
+    print("=" * 60)
+
+    print(f"\n[model] {MODEL}")
+    print(f"[mode]  {mode}")
+
     client = get_client()
+    print("[api]   Google API key loaded")
 
-    mcp_config = load_mcp_config()
-    mcp_server_names = list(mcp_config.get("mcpServers", {}).keys())
+    mcp_config = load_mcp_config(config_path)
+    mcp_servers = mcp_config.get("mcpServers", {})
 
-    if mcp_server_names:
-        print(f"Connecting to MCP servers: {', '.join(mcp_server_names)}")
+    if not mcp_servers:
+        print(f"\n[mcp]   No MCP servers configured in {config_path.name}")
+    else:
+        print(f"\n[mcp]   Loading {len(mcp_servers)} server(s) from {config_path.name}")
 
     async with AsyncExitStack() as stack:
         sessions = await connect_mcp_servers(mcp_config, stack)
-        tools, tool_session_map = await gather_mcp_tools(sessions)
-        await chat_loop(client, tools, tool_session_map)
+
+        connected = len(sessions)
+        failed = len(mcp_servers) - connected
+        if mcp_servers:
+            print(f"\n[mcp]   {connected} connected, {failed} failed")
+
+        tool_count = await list_mcp_tools(sessions)
+
+        print(f"\n[ready] {tool_count} MCP tool(s) available to {MODEL}")
+        print(f"[afc]   Automatic function calling enabled (max {MAX_TOOL_CALLS} calls/turn)")
+        print("=" * 60)
+
+        await chat_loop(client, list(sessions.values()), tool_count)
 
 
 if __name__ == "__main__":

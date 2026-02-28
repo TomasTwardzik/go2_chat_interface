@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "go2": {
+      "command": "/home/tomas_twardzik/dev/experiments/go2/go2_py311/bin/python",
+      "args": ["-m", "go2_mcp"],
+      "cwd": "/home/tomas_twardzik/dev/experiments/go2"
+    }
+  }
+}

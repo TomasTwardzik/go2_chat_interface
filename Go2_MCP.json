@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "example": {
-      "command": "uvx",
-      "args": ["mcp-server-example"],
-      "env": {}
-    }
-  }
-}
