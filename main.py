@@ -5,6 +5,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -24,11 +25,13 @@ load_dotenv()
 
 MODEL = "gemini-3-flash-preview"
 MAX_TOOL_CALLS = 10
+STEP_PAUSE = 1.0
 SAMPLE_RATE = 16000
 CHANNELS = 1
 MCP_DIR = Path(__file__).parent / "MCPs"
 MCP_REAL_CONFIG = MCP_DIR / "Go2_MCP.json"
 MCP_SIM_CONFIG = MCP_DIR / "Go2_MCP_simulator.json"
+WORKOUT_PATH = Path(__file__).parent / "Workout_procedure.md"
 
 
 def get_client() -> genai.Client:
@@ -172,6 +175,153 @@ def speak_text(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Workout runner
+# ---------------------------------------------------------------------------
+
+
+async def get_tool_list_summary(sessions: list[ClientSession]) -> str:
+    """Return a text summary of all available MCP tools."""
+    lines: list[str] = []
+    for session in sessions:
+        result = await session.list_tools()
+        for tool in result.tools:
+            desc = f": {tool.description}" if tool.description else ""
+            lines.append(f"  - {tool.name}{desc}")
+    return "\n".join(lines) if lines else "  (none)"
+
+
+async def run_workout(
+    client: genai.Client,
+    sessions: list[ClientSession],
+) -> None:
+    """Load Workout_procedure.md and execute it step by step."""
+    if not WORKOUT_PATH.exists():
+        print("[workout] Workout_procedure.md not found.")
+        return
+
+    procedure = WORKOUT_PATH.read_text()
+    tool_summary = await get_tool_list_summary(sessions)
+
+    print("\n" + "=" * 60)
+    print("[workout] Starting workout procedure")
+    print("=" * 60)
+    print(f"[workout] Available MCP tools:\n{tool_summary}")
+
+    # Extract numbered steps from the ## Stages section
+    steps: list[str] = []
+    in_stages = False
+    for line in procedure.splitlines():
+        if line.strip().startswith("## Stages"):
+            in_stages = True
+            continue
+        if in_stages and line.strip() and line.strip()[0].isdigit():
+            # Strip leading number + dot
+            step_text = line.strip().split(".", 1)[1].strip() if "." in line else line.strip()
+            steps.append(step_text)
+
+    if not steps:
+        print("[workout] No steps found in procedure.")
+        return
+
+    print(f"[workout] {len(steps)} step(s) loaded\n")
+
+    tools: list[Any] = list(sessions)
+    config = (
+        genai.types.GenerateContentConfig(
+            tools=tools,
+            automatic_function_calling=genai.types.AutomaticFunctionCallingConfig(
+                maximum_remote_calls=MAX_TOOL_CALLS,
+            ),
+        )
+        if tools
+        else None
+    )
+
+    system_prompt = (
+        "You are a workout coach controlling a Go2 robot via MCP tools.\n"
+        f"Available tools:\n{tool_summary}\n\n"
+        "Keyword reference from the procedure:\n"
+        '- "Action(<name>)" means call the MCP tool with that name.\n'
+        '- "Say(<text>)" means output exactly that text (it will be spoken aloud).\n'
+        '- "Voice: <instruction>" means generate short, motivating speech text.\n'
+        '- "Wait(<time>)" means output exactly [WAIT:<seconds>] on its own line '
+        "(e.g. Wait(0.5s) becomes [WAIT:0.5]). The system will pause.\n"
+        '- "Do N times (actions)" means repeat those actions N times, '
+        "including any Wait directives in each iteration.\n"
+        "- Don't use speakers for debug output, only for Say and Voice.\n"
+        "- Execute ONLY the current step. Be concise.\n"
+    )
+
+    history: list[genai.types.Content] = [
+        genai.types.Content(role="user", parts=[genai.types.Part(text=system_prompt)]),
+        genai.types.Content(
+            role="model",
+            parts=[genai.types.Part(text="Ready. Send me each step and I will execute it.")],
+        ),
+    ]
+
+    for i, step in enumerate(steps, 1):
+        print(f"[workout] Step {i}/{len(steps)}: {step}")
+
+        history.append(
+            genai.types.Content(
+                role="user",
+                parts=[genai.types.Part(text=f"Execute step {i}: {step}")],
+            )
+        )
+
+        try:
+            response = await client.aio.models.generate_content(
+                model=MODEL,
+                contents=history,
+                config=config,
+            )
+            result_text = response.text or ""
+
+            afc_history = response.automatic_function_calling_history
+            if afc_history:
+                for entry in afc_history:
+                    if entry.parts:
+                        for part in entry.parts:
+                            if part.function_call:
+                                fc = part.function_call
+                                print(f"  [action] {fc.name}({dict(fc.args or {})})")
+                            if part.function_response:
+                                fr = part.function_response
+                                print(f"  [result] {fr.name} -> {fr.response}")
+                history.extend(afc_history)
+
+            history.append(
+                genai.types.Content(role="model", parts=[genai.types.Part(text=result_text)])
+            )
+
+            # Process response: handle [WAIT:X] markers and speak the rest
+            wait_pattern = re.compile(r"\[WAIT:([\d.]+)]")
+            for line in result_text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                wait_match = wait_pattern.search(line)
+                if wait_match:
+                    delay = float(wait_match.group(1))
+                    print(f"  [wait]   {delay}s")
+                    await asyncio.sleep(delay)
+                else:
+                    print(f"  [say]    {line}")
+                    await asyncio.to_thread(speak_text, line)
+
+        except Exception as e:
+            print(f"  [error]  {e}")
+
+        if i < len(steps):
+            print(f"  [pause]  {STEP_PAUSE}s")
+            await asyncio.sleep(STEP_PAUSE)
+
+    print("\n[workout] Workout complete!")
+    print("=" * 60)
+
+
+# ---------------------------------------------------------------------------
 # Chat loop (uses SDK automatic function calling for MCP tools)
 # ---------------------------------------------------------------------------
 
@@ -198,7 +348,7 @@ async def chat_loop(
     )
 
     print(f"\nChat with {MODEL} ({tool_count} MCP tools available)")
-    print("Commands: 'quit'/'exit', 'clear', 'voice' (push-to-talk)")
+    print("Commands: 'quit'/'exit', 'clear', 'voice', 'start_workout'")
     print("-" * 60)
 
     while True:
@@ -218,6 +368,9 @@ async def chat_loop(
             history.clear()
             print("Conversation cleared.")
             continue
+        if user_input.lower() == "start_workout":
+            await run_workout(client, sessions)
+            continue
 
         voice_mode = user_input.lower() == "voice"
         if voice_mode:
@@ -229,6 +382,11 @@ async def chat_loop(
                     continue
                 print(f"\nYou (voice): {transcript}")
                 user_input = transcript
+
+                # Check if voice command triggers workout
+                if "start workout" in transcript.lower():
+                    await run_workout(client, sessions)
+                    continue
             except Exception as e:
                 print(f"\nError: {e}")
                 continue
