@@ -1,6 +1,6 @@
 # Chat Interface
 
-A CLI chatbot agent powered by Google Gemini (gemini-2.5-flash).
+A CLI chatbot agent powered by Google Gemini (gemini-3-flash-preview) with MCP tool support.
 
 ## Tech Stack
 
@@ -12,6 +12,7 @@ A CLI chatbot agent powered by Google Gemini (gemini-2.5-flash).
 - **soundfile** — WAV encoding / MP3 decoding
 - **numpy** — audio buffer handling
 - **gTTS** — Google Text-to-Speech for voice output
+- **mcp** — Model Context Protocol client for external tool integration
 
 ## Dev Tools
 
@@ -39,7 +40,8 @@ uv run ty check .
 
 ## Project Structure
 
-- `main.py` — entry point, chatbot CLI loop with text and voice input
+- `main.py` — entry point, async chatbot CLI with text input, voice input, and MCP tool use
+- `Go2_MCP.json` — MCP server configuration (define external tools here)
 - `.env` — holds `GOOGLE_API_KEY` (gitignored, never commit)
 - `pyproject.toml` — project config, dependencies, ruff/ty settings
 
@@ -56,6 +58,24 @@ uv run ty check .
 - Type-annotate all function signatures
 - All code must pass `ruff check`, `ruff format --check`, and `ty check` before committing
 - Keep `.env` out of version control — secrets go in `.env`, example keys in `.env.example`
+
+## MCP Configuration
+
+Define MCP servers in `Go2_MCP.json`:
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "uvx",
+      "args": ["mcp-server-package"],
+      "env": {}
+    }
+  }
+}
+```
+
+On startup, the chatbot connects to all configured MCP servers, lists their tools, and exposes them to Gemini via function calling. When Gemini invokes a tool, the chatbot routes the call to the correct MCP server and feeds the result back in an agentic loop.
 
 ## Claude Workflow
 
