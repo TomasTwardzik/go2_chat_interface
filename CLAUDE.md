@@ -9,8 +9,9 @@ A CLI chatbot agent powered by Google Gemini (gemini-2.5-flash).
 - **google-genai** — Google Gemini API client
 - **python-dotenv** — loads `.env` for API keys
 - **sounddevice** — microphone audio capture
-- **soundfile** — WAV encoding
+- **soundfile** — WAV encoding / MP3 decoding
 - **numpy** — audio buffer handling
+- **gTTS** — Google Text-to-Speech for voice output
 
 ## Dev Tools
 
@@ -45,7 +46,7 @@ uv run ty check .
 ## Chat Commands
 
 - Type text and press Enter — send a text message
-- `voice` — push-to-talk: records mic audio, transcribes it, then sends to Gemini
+- `voice` — push-to-talk: records mic audio, transcribes it, sends to Gemini, and speaks the response aloud
 - `clear` — reset conversation history
 - `quit` / `exit` / Ctrl+C — stop the chatbot
 

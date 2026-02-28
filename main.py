@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import tempfile
 import threading
 
 import numpy as np
@@ -10,6 +11,7 @@ import sounddevice as sd
 import soundfile as sf
 from dotenv import load_dotenv
 from google import genai
+from gtts import gTTS
 
 load_dotenv()
 
@@ -71,6 +73,18 @@ def transcribe_audio(client: genai.Client, model: str, audio_bytes: bytes) -> st
     return (response.text or "").strip()
 
 
+def speak_text(text: str) -> None:
+    """Convert text to speech and play it through speakers."""
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=True) as tmp:
+        tts = gTTS(text=text)
+        tts.write_to_fp(tmp)
+        tmp.flush()
+        tmp.seek(0)
+        data, samplerate = sf.read(tmp.name)
+        sd.play(data, samplerate)
+        sd.wait()
+
+
 def chat_loop(client: genai.Client) -> None:
     model = "gemini-2.5-flash"
     history: list[genai.types.Content] = []
@@ -96,7 +110,8 @@ def chat_loop(client: genai.Client) -> None:
             print("Conversation cleared.")
             continue
 
-        if user_input.lower() == "voice":
+        voice_mode = user_input.lower() == "voice"
+        if voice_mode:
             try:
                 audio_bytes = record_audio()
                 transcript = transcribe_audio(client, model, audio_bytes)
@@ -121,6 +136,9 @@ def chat_loop(client: genai.Client) -> None:
             genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
         )
         print(f"\nAssistant: {assistant_text}")
+
+        if voice_mode:
+            speak_text(assistant_text)
 
 
 def main() -> None:
