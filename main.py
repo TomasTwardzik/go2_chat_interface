@@ -446,6 +446,24 @@ async def run_workout(
         ),
     ]
 
+    # --- Voice summary of the upcoming workout ---
+    workout_text = "\n".join(f"- {s}" for s in workout_steps)
+    summary_prompt = (
+        "Before we begin, give the trainee a brief spoken summary of the workout "
+        "they are about to do. Use the `say` MCP tool to speak it aloud.\n\n"
+        "Mention: the number of exercises, a rough time estimate, list a few key "
+        "exercises by name, and the overall theme or focus of the workout. "
+        "Keep it to 2-3 sentences, upbeat and motivating.\n\n"
+        f"Workout steps:\n{workout_text}"
+    )
+    log.info("Generating workout summary")
+    await client.aio.models.generate_content(
+        model=MODEL,
+        contents=system_prefix
+        + [genai.types.Content(role="user", parts=[genai.types.Part(text=summary_prompt)])],
+        config=config,
+    )
+
     # --- Prepare phase ---
     if prepare_steps:
         log.info("--- Prepare phase (%d steps) ---", len(prepare_steps))
