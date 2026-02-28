@@ -1,6 +1,6 @@
 # Chat Interface
 
-A CLI chatbot agent powered by Google Gemini (gemini-3-flash-preview) with MCP tool support.
+A CLI chatbot agent powered by Google Gemini (gemini-3-flash-preview) with MCP tool support, voice I/O, and scripted workout runner.
 
 ## Tech Stack
 
@@ -8,7 +8,7 @@ A CLI chatbot agent powered by Google Gemini (gemini-3-flash-preview) with MCP t
 - **uv** — package manager and runner
 - **google-genai** — Google Gemini API client
 - **python-dotenv** — loads `.env` for API keys
-- **sounddevice** — microphone audio capture
+- **sounddevice** — microphone audio capture and playback
 - **soundfile** — WAV encoding / MP3 decoding
 - **numpy** — audio buffer handling
 - **gTTS** — Google Text-to-Speech for voice output
@@ -25,8 +25,14 @@ A CLI chatbot agent powered by Google Gemini (gemini-3-flash-preview) with MCP t
 # Install dependencies
 uv sync
 
-# Run the chatbot
+# Run the chatbot (real MCP server)
 uv run python main.py
+
+# Run with simulator MCP server
+uv run python main.py -s
+
+# Run with debug logging
+uv run python main.py -d
 
 # Lint
 uv run ruff check .
@@ -40,42 +46,71 @@ uv run ty check .
 
 ## Project Structure
 
-- `main.py` — entry point, async chatbot CLI with text input, voice input, and MCP tool use
-- `Go2_MCP.json` — MCP server configuration (define external tools here)
+- `main.py` — entry point, async chatbot CLI with text/voice input, MCP tools, workout runner
+- `MCPs/` — MCP server configs and custom servers
+  - `Go2_MCP.json` — real robot MCP config
+  - `Go2_MCP_simulator.json` — simulator MCP config
+  - `voice_server.py` — voice output MCP server (`say` tool for TTS)
+- `Workout_procedure.md` — scripted workout with Action/Say/Voice/Wait keywords
 - `.env` — holds `GOOGLE_API_KEY` (gitignored, never commit)
 - `pyproject.toml` — project config, dependencies, ruff/ty settings
 
 ## Chat Commands
 
 - Type text and press Enter — send a text message
-- `voice` — push-to-talk: records mic audio, transcribes it, sends to Gemini, and speaks the response aloud
+- `voice` — push-to-talk: records mic audio, transcribes, sends to Gemini, speaks response
+- `start_workout` — run the scripted workout from `Workout_procedure.md`
 - `clear` — reset conversation history
 - `quit` / `exit` / Ctrl+C — stop the chatbot
 
-## Conventions
+## CLI Flags
 
-- Use `from __future__ import annotations` in all Python files
-- Type-annotate all function signatures
-- All code must pass `ruff check`, `ruff format --check`, and `ty check` before committing
-- Keep `.env` out of version control — secrets go in `.env`, example keys in `.env.example`
+- `-s` / `--sim` — use simulator MCP server instead of real robot
+- `-d` / `--debug` — enable DEBUG-level logging (shows context sizes, AFC history, API calls)
 
 ## MCP Configuration
 
-Define MCP servers in `Go2_MCP.json`:
+MCP server configs live in `MCPs/`. Both configs include `go2` (robot) and `voice` (TTS) servers.
 
 ```json
 {
   "mcpServers": {
     "server-name": {
-      "command": "uvx",
-      "args": ["mcp-server-package"],
+      "command": "/path/to/python",
+      "args": ["server_script.py"],
+      "cwd": "/optional/working/dir",
       "env": {}
     }
   }
 }
 ```
 
-On startup, the chatbot connects to all configured MCP servers, lists their tools, and exposes them to Gemini via function calling. When Gemini invokes a tool, the chatbot routes the call to the correct MCP server and feeds the result back in an agentic loop.
+On startup, the app connects to all configured MCP servers, lists their tools (cached to avoid repeated ListToolsRequest RPCs), and exposes them to Gemini via automatic function calling (AFC). The SDK handles tool discovery, schema conversion, and routing.
+
+## Voice MCP Server
+
+`MCPs/voice_server.py` provides the `say` tool — speaks exact text via gTTS + sounddevice. Used by the workout runner for Say() and Voice() commands (Voice steps are rephrased by Gemini then passed to `say`).
+
+## Workout Runner
+
+`Workout_procedure.md` defines scripted workouts with keyword-driven steps:
+- `Action(<name>)` — call Go2 MCP tool
+- `Say(<text>)` — call `say` MCP tool with exact text
+- `Voice(<text>)` — Gemini rephrases text, then calls `say`
+- `Wait(<time>)` — model outputs `[WAIT:<seconds>]`, runner sleeps
+
+The runner parses the procedure into prepare phase and workout stages, executes each step via Gemini with AFC, and uses a **sliding context window** (last 3 step exchanges + system prompt) to bound latency. Older exchanges are collapsed to user+model pairs.
+
+## Logging
+
+Uses Python `logging` library with the `chat` logger. INFO level by default, DEBUG with `-d` flag. Debug output includes context sizes, AFC history, API call traces, and audio stats. Interactive prompts and responses use `print()`.
+
+## Conventions
+
+- Use `from __future__ import annotations` in all Python files
+- Type-annotate all function signatures
+- All code must pass `ruff check`, `ruff format --check`, and `ty check` before committing
+- Keep `.env` out of version control — secrets go in `.env`
 
 ## Claude Workflow
 
