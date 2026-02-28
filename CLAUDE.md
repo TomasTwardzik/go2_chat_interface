@@ -51,7 +51,9 @@ uv run ty check .
   - `Go2_MCP.json` — real robot MCP config
   - `Go2_MCP_simulator.json` — simulator MCP config
   - `voice_server.py` — voice output MCP server (`say` tool for TTS)
-- `Workout_procedure.md` — scripted workout with Action/Say/Voice/Wait keywords
+- `WORKOUT_PROCEDURE_DEFAULT.md` — default scripted workout with Action/Say/Voice/Wait keywords
+- `WORKOUT_PROCEDURE.md` — generated workout plan (created by `generate_workout`)
+- `RULES.md` — LLM instructions for generating valid workout plans
 - `.env` — holds `GOOGLE_API_KEY` (gitignored, never commit)
 - `pyproject.toml` — project config, dependencies, ruff/ty settings
 
@@ -59,7 +61,8 @@ uv run ty check .
 
 - Type text and press Enter — send a text message
 - `voice` — push-to-talk: records mic audio, transcribes, sends to Gemini, speaks response
-- `start_workout` — run the scripted workout from `Workout_procedure.md`
+- `start_workout` — run the scripted workout from `WORKOUT_PROCEDURE_DEFAULT.md`
+- `generate_workout` — interactively create a custom workout plan, saved to `WORKOUT_PROCEDURE.md`
 - `clear` — reset conversation history
 - `quit` / `exit` / Ctrl+C — stop the chatbot
 
@@ -93,7 +96,7 @@ On startup, the app connects to all configured MCP servers, lists their tools (c
 
 ## Workout Runner
 
-`Workout_procedure.md` defines scripted workouts with keyword-driven steps:
+`WORKOUT_PROCEDURE_DEFAULT.md` defines scripted workouts with keyword-driven steps:
 - `Action(<name>)` — call Go2 MCP tool
 - `Say(<text>)` — call `say` MCP tool with exact text
 - `Voice(<text>)` — Gemini rephrases text, then calls `say`

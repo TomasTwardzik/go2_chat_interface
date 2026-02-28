@@ -34,7 +34,10 @@ CHANNELS = 1
 MCP_DIR = Path(__file__).parent / "MCPs"
 MCP_REAL_CONFIG = MCP_DIR / "Go2_MCP.json"
 MCP_SIM_CONFIG = MCP_DIR / "Go2_MCP_simulator.json"
-WORKOUT_PATH = Path(__file__).parent / "Workout_procedure.md"
+WORKOUT_PATH = Path(__file__).parent / "WORKOUT_PROCEDURE_DEFAULT.md"
+WORKOUT_GENERATED_PATH = Path(__file__).parent / "WORKOUT_PROCEDURE.md"
+RULES_PATH = Path(__file__).parent / "RULES.md"
+MAX_REVIEW_RETRIES = 2
 
 
 def get_client() -> genai.Client:
@@ -223,7 +226,7 @@ def speak_text(text: str) -> None:
 
 
 def parse_procedure(text: str) -> dict[str, Any]:
-    """Parse Workout_procedure.md into header, prepare steps, and workout steps."""
+    """Parse WORKOUT_PROCEDURE_DEFAULT.md into header, prepare steps, and workout steps."""
     log.debug("Parsing workout procedure (%d chars)", len(text))
     header_lines: list[str] = []
     sections: dict[str, list[str]] = {}
@@ -390,10 +393,10 @@ async def run_workout(
     client: genai.Client,
     sessions: list[ClientSession],
 ) -> None:
-    """Load Workout_procedure.md, run prepare phase, then workout stages."""
+    """Load WORKOUT_PROCEDURE_DEFAULT.md, run prepare phase, then workout stages."""
     log.info("Starting workout procedure")
     if not WORKOUT_PATH.exists():
-        log.error("Workout_procedure.md not found at %s", WORKOUT_PATH)
+        log.error("WORKOUT_PROCEDURE_DEFAULT.md not found at %s", WORKOUT_PATH)
         return
 
     log.debug("Reading %s", WORKOUT_PATH)
@@ -458,6 +461,167 @@ async def run_workout(
 
 
 # ---------------------------------------------------------------------------
+# Workout plan generation
+# ---------------------------------------------------------------------------
+
+
+def _extract_markdown_block(text: str) -> str | None:
+    """Extract content from a ```markdown fenced code block, if present."""
+    pattern = re.compile(r"```markdown\s*\n(.*?)```", re.DOTALL)
+    match = pattern.search(text)
+    return match.group(1).strip() if match else None
+
+
+async def _review_plan(client: genai.Client, plan: str, rules: str) -> str | None:
+    """Review a generated workout plan against RULES.md.
+
+    Returns None if the plan passes, or a string describing the issues found.
+    """
+    review_prompt = (
+        "You are a strict reviewer. Check the following workout plan against the "
+        "validation checklist and all rules below. If the plan fully complies, respond "
+        'with exactly "PASS". Otherwise, respond with "FAIL" on the first line, '
+        "followed by a numbered list of specific issues that must be fixed.\n\n"
+        f"## Rules\n\n{rules}\n\n"
+        f"## Workout Plan to Review\n\n{plan}"
+    )
+    log.debug("Sending plan for review (%d chars)", len(plan))
+    response = await client.aio.models.generate_content(model=MODEL, contents=review_prompt)
+    result = (response.text or "").strip()
+    log.debug("Review result: %s", result[:200])
+    if result.upper().startswith("PASS"):
+        return None
+    return result
+
+
+async def generate_workout_plan(client: genai.Client) -> None:
+    """Interactive workout plan generator: gather user prefs, generate, review, save."""
+    log.info("Starting workout plan generation")
+
+    if not RULES_PATH.exists():
+        log.error("RULES.md not found at %s", RULES_PATH)
+        print("Error: RULES.md not found.")
+        return
+
+    rules = RULES_PATH.read_text()
+
+    system_prompt = (
+        "You are a workout plan designer for a Go2 robot workout coach. "
+        "You must follow these rules exactly:\n\n"
+        f"{rules}\n\n"
+        "Your task:\n"
+        "1. Ask the user about their workout preferences ONE question at a time. "
+        "Cover: fitness level, target muscle groups, available time, number of exercises, "
+        "rep/duration preference, and any injuries or limitations.\n"
+        "2. After gathering enough information, summarize the specification and ask "
+        "the user to confirm.\n"
+        "3. Once confirmed, generate the complete workout plan and wrap it in a "
+        "```markdown code block.\n\n"
+        "Start by asking your first question."
+    )
+
+    history: list[genai.types.Content] = [
+        genai.types.Content(role="user", parts=[genai.types.Part(text=system_prompt)]),
+    ]
+
+    print("\n--- Workout Plan Generator ---")
+    print("Answer the questions below to create a custom workout plan.")
+    print("Type 'cancel' to abort.\n")
+
+    # Step 1: Get initial model response (first question)
+    response = await client.aio.models.generate_content(model=MODEL, contents=history)
+    assistant_text = response.text or ""
+    history.append(genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)]))
+    print(f"Coach: {assistant_text}")
+
+    # Step 2: Multi-turn conversation until plan is generated
+    plan_content: str | None = None
+    while True:
+        try:
+            user_input = await asyncio.to_thread(input, "\nYou: ")
+            user_input = user_input.strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nPlan generation cancelled.")
+            return
+
+        if not user_input:
+            continue
+        if user_input.lower() == "cancel":
+            print("Plan generation cancelled.")
+            return
+
+        history.append(genai.types.Content(role="user", parts=[genai.types.Part(text=user_input)]))
+
+        response = await client.aio.models.generate_content(model=MODEL, contents=history)
+        assistant_text = response.text or ""
+        history.append(
+            genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
+        )
+
+        # Check if the response contains a generated plan
+        plan_content = _extract_markdown_block(assistant_text)
+        if plan_content:
+            log.info("Plan generated (%d chars)", len(plan_content))
+            print(f"\nCoach: {assistant_text}")
+            break
+
+        print(f"\nCoach: {assistant_text}")
+
+    # Compact context: drop full Q&A history, keep only the system prompt + generated plan.
+    log.debug("Compacting context: %d entries -> 2 (system + plan)", len(history))
+    history = [
+        history[0],  # original system prompt
+        genai.types.Content(
+            role="model",
+            parts=[genai.types.Part(text=f"```markdown\n{plan_content}\n```")],
+        ),
+    ]
+
+    # Step 3: Review and retry loop
+    for attempt in range(1, MAX_REVIEW_RETRIES + 2):
+        log.info("Review attempt %d", attempt)
+        print(f"\nReviewing plan (attempt {attempt})...")
+        issues = await _review_plan(client, plan_content, rules)
+
+        if issues is None:
+            log.info("Plan passed review")
+            print("Plan passed review!")
+            break
+
+        log.warning("Plan review failed: %s", issues[:200])
+        if attempt > MAX_REVIEW_RETRIES:
+            print(f"Review found issues but max retries reached. Saving anyway.\n{issues}")
+            break
+
+        print(f"Review found issues, regenerating...\n{issues}")
+
+        # Ask the generator to fix the issues
+        fix_prompt = (
+            f"The plan you generated has the following issues:\n\n{issues}\n\n"
+            "Please fix all issues and output the corrected plan in a ```markdown code block."
+        )
+        history.append(genai.types.Content(role="user", parts=[genai.types.Part(text=fix_prompt)]))
+        response = await client.aio.models.generate_content(model=MODEL, contents=history)
+        assistant_text = response.text or ""
+        history.append(
+            genai.types.Content(role="model", parts=[genai.types.Part(text=assistant_text)])
+        )
+
+        fixed_plan = _extract_markdown_block(assistant_text)
+        if fixed_plan:
+            plan_content = fixed_plan
+            log.info("Regenerated plan (%d chars)", len(plan_content))
+        else:
+            log.warning("Regeneration did not produce a markdown block, keeping previous plan")
+
+    # Step 4: Save to file
+    WORKOUT_GENERATED_PATH.write_text(plan_content + "\n")
+    log.info("Saved workout plan to %s", WORKOUT_GENERATED_PATH)
+    print(f"\nWorkout plan saved to {WORKOUT_GENERATED_PATH.name}")
+    print("Use 'start_workout' to run it (after updating the workout path if needed).")
+
+
+# ---------------------------------------------------------------------------
 # Chat loop (uses SDK automatic function calling for MCP tools)
 # ---------------------------------------------------------------------------
 
@@ -485,7 +649,7 @@ async def chat_loop(
     )
 
     print(f"\nChat with {MODEL} ({tool_count} MCP tools available)")
-    print("Commands: 'quit'/'exit', 'clear', 'voice', 'start_workout'")
+    print("Commands: 'quit'/'exit', 'clear', 'voice', 'start_workout', 'generate_workout'")
     print("-" * 60)
 
     while True:
@@ -512,6 +676,10 @@ async def chat_loop(
         if user_input.lower() == "start_workout":
             log.debug("start_workout command received")
             await run_workout(client, sessions)
+            continue
+        if user_input.lower() == "generate_workout":
+            log.debug("generate_workout command received")
+            await generate_workout_plan(client)
             continue
 
         voice_mode = user_input.lower() == "voice"

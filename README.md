@@ -77,7 +77,8 @@ Once the chatbot is running, you can use these commands at the prompt:
 |---------|-------------|
 | *(any text)* | Send a text message to Gemini |
 | `voice` | Push-to-talk: record from mic, transcribe, get spoken response |
-| `start_workout` | Run the scripted workout from `Workout_procedure.md` |
+| `start_workout` | Run the scripted workout from `WORKOUT_PROCEDURE_DEFAULT.md` |
+| `generate_workout` | Interactively create a custom workout plan |
 | `clear` | Reset conversation history |
 | `quit` / `exit` | Stop the chatbot (or press Ctrl+C) |
 
@@ -89,9 +90,11 @@ MCPs/
   Go2_MCP.json           Real robot MCP server config
   Go2_MCP_simulator.json Simulator MCP server config
   voice_server.py        Voice output MCP server (say tool)
-Workout_procedure.md     Scripted workout procedure
-.env                     API key (gitignored)
-pyproject.toml           Project config and dependencies
+WORKOUT_PROCEDURE_DEFAULT.md     Default scripted workout procedure
+WORKOUT_PROCEDURE.md             Generated workout plan (from generate_workout)
+RULES.md                         LLM rules for generating valid plans
+.env                             API key (gitignored)
+pyproject.toml                   Project config and dependencies
 ```
 
 ## Development
