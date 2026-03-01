@@ -14,16 +14,35 @@ Don't use speakers for debug and step outputs, only use it for Say and Voice com
 
 ## Workout Stages
 
-1. Action(sit)
-2. Wait (0.5 sec)
-3. Action(light_on)
-4. Action(hello)
-5. Action(light off)
-6. Voice: Greet the trainee and give them words of encouragement.
-7. Say(Let's do some pushups, 5 repetitions.)
-8. Action(stand_up)
-9. Say(Get ready)
-10. Repeat 5 times:( Action(stand_down), Action(stand_up))
-11. Voice(Good job! Now we stretch a little).
-12. Action(stretch) for 5 seconds
-13. Say(Awesome! See you at the next workout!)
+### Greeting
+- Announcement: Voice(Greet the trainee, welcome them to the workout and give them words of encouragement)
+
+### Warm-up wave
+- Announcement: Say(Let's warm up with a friendly wave)
+- Prepare:
+  1. Action(sit)
+  2. Action(light_on)
+- Movement (reps: 1):
+  1. Action(hello)
+  2. Wait(1 sec)
+  3. Action(light_off)
+
+### Push-ups
+- Announcement: Say(Let's do some push-ups, 5 repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: 5):
+  1. Action(stand_down)
+  2. Wait(0.5 sec)
+  3. Action(stand_up)
+  4. Wait(0.5 sec)
+
+### Stretching
+- Announcement: Voice(Good job! Now let's stretch and cool down for 5 seconds)
+- Prepare:
+  1. Action(stand_up)
+- Movement (period: 5s):
+  1. Action(stretch)
+
+### Farewell
+- Announcement: Say(Awesome! See you at the next workout!)

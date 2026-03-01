@@ -46,7 +46,16 @@ uv run ty check .
 
 ## Project Structure
 
-- `main.py` — entry point, async chatbot CLI with text/voice input, MCP tools, workout runner
+- `main.py` — thin entry point (arg parsing, logging config, MCP setup, launches ChatLoop)
+- `chat/` — main application package
+  - `__init__.py` — re-exports: ChatLoop, GeminiClient, MCPManager, config constants
+  - `config.py` — constants, paths, `ServiceUnavailableError`, `check_503()`
+  - `client.py` — `GeminiClient` class (wraps `genai.Client` creation)
+  - `mcp_manager.py` — `MCPManager` class (connect servers, list/cache tools)
+  - `audio.py` — `AudioIO` class (record, transcribe, speak)
+  - `chat_loop.py` — `ChatLoop` class (main REPL, command dispatch)
+  - `workout_runner.py` — `WorkoutRunner` class (parse procedure, execute steps)
+  - `workout_planner.py` — `WorkoutPlanner` class (multi-turn generation, review, save)
 - `MCPs/` — MCP server configs and custom servers
   - `Go2_MCP.json` — real robot MCP config
   - `Go2_MCP_simulator.json` — simulator MCP config
@@ -114,7 +123,7 @@ The final plan is saved to `WORKOUT_PROCEDURE.md`.
 
 ## Logging
 
-Uses Python `logging` library with the `chat` logger. INFO level by default, DEBUG with `-d` flag. Debug output includes context sizes, AFC history, API call traces, and audio stats. Interactive prompts and responses use `print()`.
+Uses Python `logging` library with hierarchical loggers under `chat` (`chat.loop`, `chat.mcp`, `chat.client`, `chat.audio`, `chat.workout.runner`, `chat.workout.planner`, `chat.config`). INFO level by default, DEBUG with `-d` flag. Debug output includes context sizes, AFC history, API call traces, and audio stats. All output goes through logging; `input()` prompts remain for stdin reading.
 
 ## Conventions
 

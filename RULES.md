@@ -28,7 +28,19 @@ The plan must be a Markdown file with exactly this structure:
 
 ## Workout Stages
 
-<numbered workout steps>
+### <Exercise Name>
+- Announcement: <Say or Voice command>
+- Prepare:
+  1. <Action step>
+- Movement (reps: N):
+  1. <Action/Wait steps for one rep>
+
+### <Exercise Name>
+- Announcement: <Say or Voice command>
+- Prepare:
+  1. <Action step>
+- Movement (period: Ns):
+  1. <Action steps>
 ```
 
 ### Rules
@@ -36,7 +48,8 @@ The plan must be a Markdown file with exactly this structure:
 1. The title must be exactly `# Workout Procedure`.
 2. There must be exactly two sections: `## Prepare phase` and `## Workout Stages`, in that order.
 3. Section names are case-sensitive and must match exactly.
-4. Every step must be a numbered line (`1.`, `2.`, etc.), starting from 1 and incrementing without gaps.
+4. Prepare phase steps must be numbered lines (`1.`, `2.`, etc.), starting from 1.
+5. Workout Stages contain `### ` exercise blocks (see Exercise Block Structure below).
 
 ## Header
 
@@ -53,7 +66,7 @@ Don't use speakers for debug and step outputs, only use it for Say and Voice com
 
 ## Keywords
 
-Every step must use exactly one of these four keywords:
+Every step within an exercise block must use exactly one of these four keywords:
 
 ### Action(`<mcp_action>`)
 
@@ -61,7 +74,6 @@ Calls a Go2 robot MCP tool.
 
 - The argument must be a valid Go2 action name (e.g. `sit`, `stand_up`, `stand_down`, `stretch`, `hello`, `light_on`, `light_off`, `obstacle avoidance off`).
 - Use `Action(list_actions)` only in the prepare phase to load available commands.
-- An optional duration can follow: `Action(stretch) for 5 seconds`.
 
 ### Say(`<text>`)
 
@@ -84,21 +96,8 @@ The model rephrases the text into friendly, natural speech, then speaks it.
 Pauses execution for the given duration.
 
 - Format the time as a number followed by a unit: `Wait(0.5 sec)`, `Wait(3 sec)`, `Wait(10 sec)`.
-- Use between exercises for rest periods and between actions for timing.
+- Use between actions within a movement for timing and rest.
 - Minimum wait: 0.5 sec. Maximum wait: 120 sec.
-
-## Repeat Blocks
-
-For repeated movements, use inline repeat notation on a single numbered step:
-
-```
-10. Repeat 5 times:( Action(stand_down), Action(stand_up))
-```
-
-- Format: `Repeat <N> times:( <step>, <step>, ... )`
-- Each inner step must be a valid keyword call.
-- Separate inner steps with commas.
-- N must be between 1 and 20.
 
 ## Prepare Phase Rules
 
@@ -109,95 +108,185 @@ The prepare phase sets up the robot. It must:
 3. Contain no Say, Voice, or Wait steps.
 4. Have no more than 5 steps total.
 
+## Exercise Block Structure
+
+Every exercise in the `## Workout Stages` section is a `### <Exercise Name>` block with three phases:
+
+### 1. Announcement (required)
+
+```
+- Announcement: Say(<exercise name, rep count or duration>)
+```
+
+or
+
+```
+- Announcement: Voice(<exercise name, rep count or duration>)
+```
+
+- Must state the exercise name and either the number of repetitions or the time period.
+- Use `Say()` for precise cues, `Voice()` for friendly/motivational phrasing.
+- For greeting/farewell blocks, the Announcement is the only required field.
+
+### 2. Prepare (optional)
+
+```
+- Prepare:
+  1. Action(<action>)
+  2. Action(<action>)
+```
+
+- Numbered Action steps to position the robot in the starting position for the exercise.
+- Omit this section for announcement-only blocks (greeting, farewell).
+
+### 3. Movement (optional)
+
+For repetition-based exercises:
+
+```
+- Movement (reps: N):
+  1. Action(<action>)
+  2. Wait(<time>)
+  3. Action(<action>)
+  4. Wait(<time>)
+```
+
+For time-based exercises:
+
+```
+- Movement (period: Ns):
+  1. Action(<action>)
+```
+
+- **reps: N** — the runner repeats the numbered steps N times. N must be between 1 and 20.
+- **period: Ns** — the runner executes the steps once, then waits for the specified duration. Format: integer or decimal followed by `s` (e.g. `5s`, `10s`, `0.5s`).
+- Steps within Movement must be numbered starting from 1.
+- Include `Wait()` steps between actions within a rep to give the user time to follow along.
+- Omit this section for announcement-only blocks (greeting, farewell).
+
 ## Workout Stages Rules
 
-The workout section is the main routine. It must follow these rules:
+The Workout Stages section contains `### ` exercise blocks. It must follow these rules:
 
-1. **Start with a greeting** — begin with a Voice or Say step to greet and motivate the user.
-2. **Announce each exercise** — before any Action that the user performs, use Say or Voice to tell them what is coming and how many reps or how long.
-3. **Include rest periods** — add Wait steps between exercises (at least 1 sec between different exercises).
-4. **End with a sign-off** — the final step must be a Say or Voice farewell.
-5. **Exercise safety ordering**:
-   - Begin with a warm-up (light movements or stretches).
+1. **Start with a greeting** — the first block should be an announcement-only block greeting and motivating the user.
+2. **End with a farewell** — the last block should be an announcement-only block with a farewell message.
+3. **Exercise safety ordering**:
+   - Begin with warm-up exercises (light movements or stretches).
    - Place high-intensity exercises in the middle.
-   - End with a cool-down (stretches or light movements).
-6. **Rep counts and durations must be appropriate** for the user's stated fitness level:
+   - End with cool-down exercises (stretches or light movements).
+4. **Rep counts and durations must be appropriate** for the user's stated fitness level:
    - Beginner: 3–5 reps or 5–10 sec holds
    - Intermediate: 5–10 reps or 10–20 sec holds
    - Advanced: 10–20 reps or 20–30 sec holds
-7. **Total step count** should stay between 8 and 40 steps.
+5. **Exercise count** should be between 3 and 15 exercise blocks (including greeting/farewell).
 
 ## Common Exercise Breakdowns
 
-The robot demonstrates exercises using its available actions. Below are the standard breakdowns for common exercises. When including an exercise in a workout plan, follow the listed prepare position and per-rep sequence exactly. Adjust rep counts and wait durations to the user's fitness level.
+The robot demonstrates exercises using its available actions. Below are the standard breakdowns for common exercises using the three-phase format. When including an exercise in a workout plan, follow these breakdowns exactly. Adjust rep counts, period durations, and wait times to the user's fitness level.
 
 ### Push-ups
 
 Targets: chest, shoulders, triceps.
 
-- **Prepare position:** `Action(stand_up)` — robot stands in high plank equivalent.
-- **One rep:**
-  1. `Action(stand_down)` — lower to low plank
-  2. `Wait(0.5 sec)` — brief hold at bottom
-  3. `Action(stand_up)` — push back up
-  4. `Wait(0.5 sec)` — brief hold at top
-- **As a Repeat block:** `Repeat N times:( Action(stand_down), Wait(0.5 sec), Action(stand_up), Wait(0.5 sec))`
+```markdown
+### Push-ups
+- Announcement: Say(Let's do push-ups, N repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: N):
+  1. Action(stand_down)
+  2. Wait(0.5 sec)
+  3. Action(stand_up)
+  4. Wait(0.5 sec)
+```
 
 ### Squats
 
 Targets: quadriceps, glutes, hamstrings.
 
-- **Prepare position:** `Action(stand_up)` — robot stands upright.
-- **One rep:**
-  1. `Action(sit)` — lower into squat
-  2. `Wait(1 sec)` — hold at bottom
-  3. `Action(stand_up)` — rise back up
-  4. `Wait(0.5 sec)` — brief pause at top
-- **As a Repeat block:** `Repeat N times:( Action(sit), Wait(1 sec), Action(stand_up), Wait(0.5 sec))`
+```markdown
+### Squats
+- Announcement: Say(Time for squats, N repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: N):
+  1. Action(sit)
+  2. Wait(1 sec)
+  3. Action(stand_up)
+  4. Wait(0.5 sec)
+```
 
 ### Burpees
 
 Targets: full body, cardio.
 
-- **Prepare position:** `Action(stand_up)` — robot stands upright.
-- **One rep:**
-  1. `Action(stand_down)` — drop to ground
-  2. `Wait(0.5 sec)` — brief ground contact
-  3. `Action(stand_up)` — jump back up
-  4. `Wait(0.5 sec)` — brief pause
-- **As a Repeat block:** `Repeat N times:( Action(stand_down), Wait(0.5 sec), Action(stand_up), Wait(0.5 sec))`
+```markdown
+### Burpees
+- Announcement: Say(Burpees, N repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: N):
+  1. Action(stand_down)
+  2. Wait(0.5 sec)
+  3. Action(stand_up)
+  4. Wait(0.5 sec)
+```
 
 ### Stretching / Hold
 
 Targets: flexibility, cool-down.
 
-- **Execution:** `Action(stretch) for N seconds` — robot holds stretch position for the given duration.
-- Typical durations: beginner 5 sec, intermediate 10 sec, advanced 20 sec.
+```markdown
+### Stretching
+- Announcement: Voice(Time to stretch and hold for N seconds)
+- Prepare:
+  1. Action(stand_up)
+- Movement (period: Ns):
+  1. Action(stretch)
+```
 
 ### Up-downs (Beginner burpee alternative)
 
 Targets: full body, low impact.
 
-- **Prepare position:** `Action(stand_up)` — robot stands upright.
-- **One rep:**
-  1. `Action(sit)` — lower to ground
-  2. `Wait(1 sec)` — rest at bottom
-  3. `Action(stand_up)` — stand back up
-  4. `Wait(1 sec)` — rest at top
-- **As a Repeat block:** `Repeat N times:( Action(sit), Wait(1 sec), Action(stand_up), Wait(1 sec))`
+```markdown
+### Up-downs
+- Announcement: Say(Up-downs, N repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: N):
+  1. Action(sit)
+  2. Wait(1 sec)
+  3. Action(stand_up)
+  4. Wait(1 sec)
+```
 
 ### Plank hold
 
 Targets: core, shoulders.
 
-- **Execution:** `Action(stand_down)` followed by `Wait(N sec)` then `Action(stand_up)`.
-- The wait duration is the hold time. Beginner 10 sec, intermediate 20 sec, advanced 30 sec.
+```markdown
+### Plank hold
+- Announcement: Say(Plank hold for N seconds)
+- Prepare:
+  1. Action(stand_up)
+- Movement (period: Ns):
+  1. Action(stand_down)
+```
 
 ### Greeting / Cool-down wave
 
-Used as a warm-up intro or cool-down farewell.
+Used as a warm-up intro or cool-down farewell. Announcement-only block.
 
-- **Execution:** `Action(hello)` — robot waves. Pair with a `Voice()` or `Say()` greeting.
+```markdown
+### Greeting
+- Announcement: Voice(Greet the trainee and give them words of encouragement)
+```
+
+```markdown
+### Farewell
+- Announcement: Say(Great workout! See you next time!)
+```
 
 ### Exercise selection guidelines
 
@@ -213,17 +302,19 @@ After generating the plan, verify every item:
 - [ ] Title is exactly `# Workout Procedure`
 - [ ] Header contains all keyword definitions verbatim
 - [ ] Exactly two sections: `## Prepare phase` then `## Workout Stages`
-- [ ] All steps are numbered sequentially starting from 1 in each section
-- [ ] Every step uses exactly one valid keyword (Action, Say, Voice, Wait, or Repeat)
+- [ ] Prepare phase steps are numbered sequentially starting from 1
 - [ ] Prepare phase starts with `Action(obstacle avoidance off)` and `Action(list_actions)`
 - [ ] Prepare phase contains no Say, Voice, or Wait steps
-- [ ] Workout starts with a greeting (Say or Voice)
-- [ ] Workout ends with a farewell (Say or Voice)
-- [ ] Every exercise Action is preceded by an announcement (Say or Voice)
-- [ ] Rest Waits exist between different exercises
+- [ ] Every exercise in Workout Stages is a `### <Name>` block
+- [ ] Every exercise block has an `- Announcement:` line with Say or Voice
+- [ ] Announcement states the exercise name and rep count or duration
+- [ ] Exercise blocks with movement have a `- Prepare:` section with Action steps
+- [ ] Movement uses either `reps: N` (1–20) or `period: Ns` format
+- [ ] Movement steps are numbered sequentially starting from 1
+- [ ] Wait steps exist between actions within each rep
+- [ ] First block is a greeting (announcement-only)
+- [ ] Last block is a farewell (announcement-only)
 - [ ] Rep counts and durations match the user's fitness level
-- [ ] No empty lines between numbered steps within a section
-- [ ] Total workout stages between 8 and 40 steps
-- [ ] All exercises follow the breakdowns from the Common Exercise Breakdowns section
+- [ ] Exercise count is between 3 and 15 blocks
+- [ ] All exercises follow the breakdowns from Common Exercise Breakdowns
 - [ ] Only valid robot actions are used (`stand_up`, `stand_down`, `sit`, `stretch`, `hello`, `light_on`, `light_off`)
-- [ ] Wait steps are included between actions within each rep
