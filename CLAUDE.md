@@ -70,7 +70,7 @@ uv run ty check .
 
 - Type text and press Enter — send a text message
 - `voice` — push-to-talk: records mic audio, transcribes, sends to Gemini, speaks response
-- `start_workout` — run the scripted workout from `WORKOUT_PROCEDURE_DEFAULT.md`
+- `start_workout` — run a workout (prefers `WORKOUT_PROCEDURE.md`, falls back to `WORKOUT_PROCEDURE_DEFAULT.md`)
 - `generate_workout` — interactively create a custom workout plan, saved to `WORKOUT_PROCEDURE.md`
 - `clear` — reset conversation history
 - `quit` / `exit` / Ctrl+C — stop the chatbot
@@ -103,23 +103,43 @@ On startup, the app connects to all configured MCP servers, lists their tools (c
 
 `MCPs/voice_server.py` provides the `say` tool — speaks exact text via gTTS + sounddevice. Used by the workout runner for Say() and Voice() commands (Voice steps are rephrased by Gemini then passed to `say`).
 
-## Workout Runner
+## Workout Procedure Format
 
-`WORKOUT_PROCEDURE_DEFAULT.md` defines scripted workouts with keyword-driven steps:
+Workout procedures (both default and generated) use a structured exercise block format with four keywords:
 - `Action(<name>)` — call Go2 MCP tool
 - `Say(<text>)` — call `say` MCP tool with exact text
 - `Voice(<text>)` — Gemini rephrases text, then calls `say`
 - `Wait(<time>)` — model outputs `[WAIT:<seconds>]`, runner sleeps
 
-The runner parses the procedure into prepare phase and workout stages, executes each step via Gemini with AFC, and uses a **sliding context window** (last 3 step exchanges + system prompt) to bound latency. Older exchanges are collapsed to user+model pairs.
+Each exercise is a `### <Name>` block with three phases:
+1. **Announcement** — `Say()` or `Voice()` stating exercise name and reps/duration
+2. **Prepare** — `Action()` steps to position the robot in starting position
+3. **Movement** — either `reps: N` (runner loops N times) or `period: Ns` (runner executes once, then waits)
+
+Announcement-only blocks (no Prepare/Movement) are used for greetings and farewells.
+
+## Workout Runner
+
+The `start_workout` command loads a workout procedure and executes it. The runner prefers `WORKOUT_PROCEDURE.md` (user-generated plan) if it exists, falling back to `WORKOUT_PROCEDURE_DEFAULT.md` (the built-in default).
+
+Execution flow:
+1. Voice summary of the upcoming workout (exercise names, rough time estimate)
+2. Prepare phase — flat numbered steps (obstacle avoidance off, list actions)
+3. Exercise loop — for each exercise block: execute announcement, run prepare steps, then drive the movement loop (rep-based or period-based)
+
+Each step is sent to Gemini with AFC enabled. A **sliding context window** (last 3 step exchanges + system prompt) bounds latency. All exchanges are immediately collapsed to user+model pairs to prevent AFC history bloat.
 
 ## Workout Plan Generator
 
-The `generate_workout` command launches a multi-turn conversation where Gemini asks the user about their workout preferences (fitness level, target muscles, time, reps, injuries) one question at a time. Once confirmed, the model generates a workout plan following the rules in `RULES.md`.
+The `generate_workout` command launches a multi-turn conversation where Gemini asks the user about their workout preferences (fitness level, target muscles, time, reps, injuries) one question at a time. Once confirmed, the model generates a workout plan following the structured exercise format defined in `RULES.md`.
 
-`RULES.md` defines the required plan structure, valid keywords, exercise breakdowns (push-ups, squats, burpees, stretches, etc.), and a validation checklist. After generation, a separate review model call checks the plan for compliance. If issues are found, the generator retries (up to 2 times). The full Q&A history is kept during the conversation; context is compacted after the plan is extracted before entering the review loop.
+`RULES.md` defines the required plan structure, valid keywords, the three-phase exercise block format, common exercise breakdowns (push-ups, squats, burpees, stretches, etc.), and a validation checklist.
 
-The final plan is saved to `WORKOUT_PROCEDURE.md`.
+Generation flow:
+1. Multi-turn Q&A with full context retained for best plan quality
+2. Plan saved immediately to `WORKOUT_PROCEDURE.md`
+3. Context compacted (drop Q&A, keep system prompt + plan)
+4. Severity-aware review against RULES.md — **PASS** (done), **MINOR** issues (logged as warnings, plan kept), **MAJOR** issues (rework up to 2 retries, re-save after each fix)
 
 ## Logging
 

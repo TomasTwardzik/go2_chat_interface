@@ -22,6 +22,23 @@ brew install portaudio libsndfile
 
 These are only needed if you plan to use the `voice` command or the workout runner's speech output.
 
+### Go2 MCP server (robot control)
+
+The chatbot connects to a Go2 robot via an MCP server provided by the upstream [go2_main](https://github.com/zhaw-physical-ai/go2_main) repository. You need to clone it and set up its environment separately:
+
+```bash
+git clone https://github.com/zhaw-physical-ai/go2_main.git
+cd go2_main
+```
+
+Follow the repo's setup instructions to install dependencies and source its Python environment. To run the simulator MCP server (no real robot needed):
+
+```bash
+python go2_mcp/dummy_simulator.py
+```
+
+The MCP server configs in `MCPs/` reference the Go2 server's Python path and script location. You may need to update `Go2_MCP.json` and `Go2_MCP_simulator.json` to match your local paths.
+
 ## Installation
 
 1. Clone the repository:
@@ -77,7 +94,7 @@ Once the chatbot is running, you can use these commands at the prompt:
 |---------|-------------|
 | *(any text)* | Send a text message to Gemini |
 | `voice` | Push-to-talk: record from mic, transcribe, get spoken response |
-| `start_workout` | Run the scripted workout from `WORKOUT_PROCEDURE_DEFAULT.md` |
+| `start_workout` | Run a workout (prefers generated plan, falls back to default) |
 | `generate_workout` | Interactively create a custom workout plan |
 | `clear` | Reset conversation history |
 | `quit` / `exit` | Stop the chatbot (or press Ctrl+C) |
@@ -85,17 +102,54 @@ Once the chatbot is running, you can use these commands at the prompt:
 ## Project Structure
 
 ```
-main.py                  Entry point — async chatbot CLI
+main.py                          Thin entry point (arg parsing, logging, MCP setup)
+chat/                            Main application package
+  __init__.py                    Re-exports for clean imports
+  config.py                      Constants, paths, error classes
+  client.py                      GeminiClient (wraps genai.Client)
+  mcp_manager.py                 MCPManager (server connections, tool caching)
+  audio.py                       AudioIO (record, transcribe, speak)
+  chat_loop.py                   ChatLoop (main REPL, command dispatch)
+  workout_runner.py              WorkoutRunner (parse & execute workout procedures)
+  workout_planner.py             WorkoutPlanner (multi-turn generation, review)
 MCPs/
-  Go2_MCP.json           Real robot MCP server config
-  Go2_MCP_simulator.json Simulator MCP server config
-  voice_server.py        Voice output MCP server (say tool)
+  Go2_MCP.json                   Real robot MCP server config
+  Go2_MCP_simulator.json         Simulator MCP server config
+  voice_server.py                Voice output MCP server (say tool)
 WORKOUT_PROCEDURE_DEFAULT.md     Default scripted workout procedure
 WORKOUT_PROCEDURE.md             Generated workout plan (from generate_workout)
 RULES.md                         LLM rules for generating valid plans
 .env                             API key (gitignored)
 pyproject.toml                   Project config and dependencies
 ```
+
+## Workout Procedure Format
+
+Workout procedures use a structured exercise block format. Each exercise is a `### <Name>` block with three phases:
+
+1. **Announcement** — `Say()` or `Voice()` stating exercise name and reps/duration
+2. **Prepare** — `Action()` steps to position the robot in starting position
+3. **Movement** — `reps: N` (repeated N times) or `period: Ns` (executed once, then hold)
+
+Example:
+
+```markdown
+### Push-ups
+- Announcement: Say(Let's do some push-ups, 5 repetitions)
+- Prepare:
+  1. Action(stand_up)
+- Movement (reps: 5):
+  1. Action(stand_down)
+  2. Wait(0.5 sec)
+  3. Action(stand_up)
+  4. Wait(0.5 sec)
+```
+
+`WORKOUT_PROCEDURE_DEFAULT.md` provides a built-in workout. `generate_workout` creates custom plans saved to `WORKOUT_PROCEDURE.md`. The `start_workout` command prefers the generated plan if it exists, otherwise falls back to the default.
+
+## Workout Plan Generator
+
+The `generate_workout` command uses a multi-turn conversation where Gemini asks about your preferences (fitness level, target muscles, time, reps, injuries), then generates a plan following `RULES.md`. The plan is saved immediately, then reviewed for compliance — only major structural issues trigger a rework; minor issues are logged and the plan is kept as-is.
 
 ## Development
 
@@ -114,7 +168,7 @@ uv run ty check .
 
 ### ~~1. Dynamic workout plan generation~~ (Implemented)
 
-Implemented as the `generate_workout` command. Uses multi-turn Gemini conversation to gather user preferences, generates a plan following `RULES.md`, and reviews it for compliance before saving to `WORKOUT_PROCEDURE.md`.
+Implemented as the `generate_workout` command. Uses multi-turn Gemini conversation to gather user preferences, generates a structured exercise plan following `RULES.md`, saves immediately, then reviews with severity-aware classification (PASS/MINOR/MAJOR). The runner executes each exercise through its three phases (announcement, prepare, movement loop).
 
 ### 2. Unified voice and text input
 
